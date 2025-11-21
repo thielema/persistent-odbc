@@ -56,7 +56,8 @@ migrate' :: [EntityDef]
 migrate' allDefs getter val = do
     let name = entityDB val
     (idClmn, old, mseq) <- getColumns getter val
-    let (newcols, udefs, fdefs) = mkColumns allDefs val
+    let (newcols, udefs, fdefs) =
+            mkColumns allDefs val emptyBackendSpecificOverrides
     let udspair = map udToPair udefs
     let addSequence = AddSequence $ concat
             [ "CREATE SEQUENCE "
@@ -84,7 +85,9 @@ migrate' allDefs getter val = do
                         AddUniqueConstraint uname $
                         map (findTypeOfColumn allDefs name) ucols ]
         let foreigns = tracex ("in migrate' newcols=" ++ show newcols) $ do
-              Column { cName=cname, cReference=Just (refTblName, a) } <- newcols
+              Column { cName=cname, cReference=Just cRef } <- newcols
+              let refTblName = crTableName cRef
+              let a = crConstraintName cRef
               tracex ("\n\n111foreigns cname="++show cname++" name="++show name++" refTblName="++show refTblName++" a="++show a) $
                return $ AlterColumn name (refTblName, addReference allDefs (refName name cname) refTblName cname)
 
@@ -95,7 +98,9 @@ migrate' allDefs getter val = do
       -- No errors and something found, migrate
       (_, _, ([], old'),mseq') -> do
         let excludeForeignKeys (xs,ys) = (map (\c -> case cReference c of
-                                                    Just (_,fk) -> case find (\f -> fk == foreignConstraintNameDBName f) fdefs of
+                                                    Just cRef ->
+                                                        let fk = crConstraintName cRef in
+                                                                 case find (\f -> fk == foreignConstraintNameDBName f) fdefs of
                                                                      Just _ -> tracex ("\n\n\nremoving cos a composite fk="++show fk) $
                                                                                 c { cReference = Nothing }
                                                                      Nothing -> c
@@ -289,7 +294,7 @@ getColumn getter tname [ PersistByteString cname
       ref <- case cntrs of
                [] -> return Nothing
                [[PersistByteString tab, PersistByteString ref]] ->
-                   return $ Just (DBName $ T.decodeUtf8 tab, DBName $ T.decodeUtf8 ref)
+                   return $ Just $ ColumnReference (DBName $ T.decodeUtf8 tab) (DBName $ T.decodeUtf8 ref) noCascade
                a1 -> fail $ "Oracle.getColumn/getRef: never here error[" ++ show a1 ++ "]"
 
       -- Okay!
@@ -297,6 +302,7 @@ getColumn getter tname [ PersistByteString cname
         { cName = DBName $ T.decodeUtf8 cname
         , cNull = null_ == "Y"
         , cSqlType = type_
+        , cGenerated = Nothing
         , cDefault = default_
         , cDefaultConstraintName = Nothing
         , cMaxLen = Nothing -- FIXME: maxLen
@@ -369,7 +375,7 @@ getAlters allDefs tblName (c1, u1) (c2, u2) =
 
     dropColumn col =
       map ((,) (cName col)) $
-        [DropReference n | Just (_, n) <- [cReference col]] ++
+        [DropReference (crConstraintName cRef) | Just cRef <- [cReference col]] ++
         [Drop]
 
     getAltersU [] old = map (DropUniqueConstraint . fst) old
@@ -392,22 +398,30 @@ getAlters allDefs tblName (c1, u1) (c2, u2) =
 -- changed in the columns @oldColumns@ for @newColumn@ to be
 -- supported.
 findAlters :: DBName -> [EntityDef] -> Column -> [Column] -> ([AlterColumn'], [Column])
-findAlters tblName allDefs col@(Column name isNull type_ def _defConstraintName _maxLen ref) cols =
+findAlters tblName allDefs col@(Column name isNull type_ def _generated _defConstraintName _maxLen ref) cols =
     tracex ("\n\n\nfindAlters tablename="++show tblName++ " name="++ show name++" col="++show col++"\ncols="++show cols++"\n\n\n") $
       case filter ((name ==) . cName) cols of
         [] -> case ref of
                Nothing -> ([(name, Add' col)], [])
-               Just (tname, b) -> let cnstr = tracex ("\n\ncols="++show cols++"\n\n2222findalters new foreignkey col["++showColumn col++"] name["++show name++"] tname["++show tname++"] b["++show b ++ "]") $
+               Just cRef ->
+                   let tname = crTableName cRef in
+                   let b = crConstraintName cRef in
+                   let cnstr = tracex ("\n\ncols="++show cols++"\n\n2222findalters new foreignkey col["++showColumn col++"] name["++show name++"] tname["++show tname++"] b["++show b ++ "]") $
                                               [addReference allDefs (refName tblName name) tname name]
                                   in (map ((,) name) (Add' col : cnstr), cols)
-        Column _ isNull' type_' def' _defConstraintName' _maxLen' ref':_ ->
+        Column _ isNull' type_' def' _generated _defConstraintName' _maxLen' ref':_ ->
             let -- Foreign key
                 refDrop = case (ref == ref', ref') of
-                            (False, Just (_, cname)) -> tracex ("\n\n44444findalters dropping foreignkey cname[" ++ show cname ++ "] ref[" ++ show ref ++"]") $
+                            (False, Just cRef) ->
+                                let cname = crConstraintName cRef in
+                                tracex ("\n\n44444findalters dropping foreignkey cname[" ++ show cname ++ "] ref[" ++ show ref ++"]") $
                                                         [(name, DropReference cname)]
                             _ -> []
                 refAdd  = case (ref == ref', ref) of
-                            (False, Just (tname, cname)) -> tracex ("\n\n33333 findalters foreignkey has changed cname["++show cname++"] name["++show name++"] tname["++show tname++"] ref["++show ref++"] ref'["++show ref' ++ "]") $
+                            (False, Just cRef) ->
+                                let tname = crTableName cRef in
+                                let cname = crConstraintName cRef in
+                                tracex ("\n\n33333 findalters foreignkey has changed cname["++show cname++"] name["++show name++"] tname["++show tname++"] ref["++show ref++"] ref'["++show ref' ++ "]") $
                                                              [(tname, addReference allDefs (refName tblName name) tname name)]
                             _ -> []
                 -- Type and nullability
@@ -442,7 +456,7 @@ tpcheck a b = a==b
 -- | Prints the part of a @CREATE TABLE@ statement about a given
 -- column.
 showColumn :: Column -> String
-showColumn (Column n nu t def _defConstraintName maxLen _ref) = concat
+showColumn (Column n nu t def _generated _defConstraintName maxLen _ref) = concat
     [ escapeDBName n
     , " "
     , showSqlType t maxLen
@@ -509,14 +523,14 @@ showAlterTable table (DropUniqueConstraint cname) = concat
 
 -- | Render an action that must be done on a column.
 showAlter :: DBName -> AlterColumn' -> String
-showAlter table (_oldName, Change (Column n nu t def defConstraintName maxLen _ref)) =
+showAlter table (_oldName, Change (Column n nu t def generated defConstraintName maxLen _ref)) =
     concat
     [ "ALTER TABLE "
     , escapeDBName table
     , " MODIFY ("
   --  , escapeDBName oldName
     , " "
-    , showColumn (Column n nu t def defConstraintName maxLen Nothing)
+    , showColumn (Column n nu t def generated defConstraintName maxLen Nothing)
     , ")"
     ]
 showAlter table (_, Add' col) =

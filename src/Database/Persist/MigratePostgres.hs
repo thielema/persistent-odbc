@@ -59,7 +59,8 @@ migrate' allDefs getter val = fmap (fmap $ map showAlterDb) $ do
     case partitionEithers old of
         ([], old'') -> do
             let old' = partitionEithers old''
-            let (newcols', udefs, fdefs) = mkColumns allDefs val
+            let (newcols', udefs, fdefs) =
+                    mkColumns allDefs val emptyBackendSpecificOverrides
             let newcols = filter (not . safeToRemove val . cName) newcols'
             let udspair = map udToPair udefs
             --let composite = isJust $ entityPrimary val
@@ -81,7 +82,7 @@ migrate' allDefs getter val = fmap (fmap $ map showAlterDb) $ do
                             ]
                     let uniques = flip concatMap udspair $ \(uname, ucols) ->
                             [AlterTable name $ AddUniqueConstraint uname ucols]
-                        references = mapMaybe (\c@Column { cName=cname, cReference=Just (refTblName, _) } -> getAddReference allDefs name refTblName cname (cReference c)) $ filter (\c -> cReference c /= Nothing) newcols
+                        references = mapMaybe (\c@Column { cName=cname, cReference=Just colRef } -> getAddReference allDefs name (crTableName colRef) cname (cReference c)) $ filter (\c -> cReference c /= Nothing) newcols
                         foreignsAlt = map (\fdef -> let (childfields, parentfields) = unzip (map (\((_,b),(_,d)) -> (b,d)) (foreignFields fdef))
                                                     in AlterColumn name (foreignRefTableDBName fdef, AddReference (foreignConstraintNameDBName fdef) childfields parentfields)) fdefs
                     return $ Right $ addTable : uniques ++ references ++ foreignsAlt
@@ -193,7 +194,7 @@ getColumns getter def = do
 -- list.
 safeToRemove :: EntityDef -> DBName -> Bool
 safeToRemove def (DBName colName)
-    = any (elem "SafeToRemove" . fieldAttrs)
+    = any (elem FieldAttrSafeToRemove . fieldAttrs)
     $ filter ((== (DBName colName)) . fieldDB)
     $ entityFields def
 
@@ -244,6 +245,7 @@ getColumn getter tname [PersistByteString x, PersistByteString y, PersistByteStr
                         { cName = cname
                         , cNull = y == "YES"
                         , cSqlType = t
+                        , cGenerated = Nothing
                         , cDefault = d''
                         , cDefaultConstraintName = Nothing
                         , cMaxLen = Nothing
@@ -285,8 +287,8 @@ getColumn getter tname [PersistByteString x, PersistByteString y, PersistByteStr
             m <- CL.head
 
             return $ case m of
-              Just [PersistText _table, PersistText _col, PersistText reftable, PersistText _refcol, PersistInt64 _pos] -> Just (DBName reftable, ref)
-              Just [PersistByteString _table, PersistByteString _col, PersistByteString reftable, PersistByteString _refcol, PersistInt64 _pos] -> Just (DBName (T.decodeUtf8 reftable), ref)
+              Just [PersistText _table, PersistText _col, PersistText reftable, PersistText _refcol, PersistInt64 _pos] -> Just $ ColumnReference (DBName reftable) ref noCascade
+              Just [PersistByteString _table, PersistByteString _col, PersistByteString reftable, PersistByteString _refcol, PersistInt64 _pos] -> Just $ ColumnReference (DBName (T.decodeUtf8 reftable)) ref noCascade
               Nothing -> Nothing
               _ -> error $ "unexpected result found ["++ show m ++ "]" )
     d' = case d of
@@ -314,20 +316,25 @@ getColumn _ a2 x =
     return $ Left $ pack $ "Invalid result from information_schema: " ++ show x ++ " a2[" ++ show a2 ++ "]"
 
 findAlters :: [EntityDef] -> DBName -> Column -> [Column] -> ([AlterColumn'], [Column])
-findAlters defs tablename col@(Column name isNull sqltype def _defConstraintName _maxLen ref) cols =
+findAlters defs tablename col@(Column name isNull sqltype def _generated _defConstraintName _maxLen ref) cols =
     tracex ("\n\n\nfindAlters tablename="++show tablename++ " name="++ show name++" col="++show col++"\ncols="++show cols++"\n\n\n") $ case filter ((name ==) . cName) cols of
         [] -> ([(name, Add' col)], cols)
-        Column _ isNull' sqltype' def' defConstraintName' _maxLen' ref':_ ->
+        Column _ isNull' sqltype' def' _generated defConstraintName' _maxLen' ref':_ ->
             let refDrop Nothing = []
-                refDrop (Just (_, cname)) = tracex ("\n\n\n44444 findAlters dropping fkey defConstraintName'="++show defConstraintName' ++" name="++show name++" cname="++show cname++" tablename="++show tablename++"\n\n\n") $
+                refDrop (Just cRef) =
+                    let cname = crConstraintName cRef in
+                    tracex ("\n\n\n44444 findAlters dropping fkey defConstraintName'="++show defConstraintName' ++" name="++show name++" cname="++show cname++" tablename="++show tablename++"\n\n\n") $
                                              [(name, DropReference cname)]
                 refAdd Nothing = []
-                refAdd (Just (tname, a)) = tracex ("\n\n\n33333 findAlters adding fkey defConstraintName'="++show defConstraintName' ++" name="++show name++" tname="++show tname++" a="++show a++" tablename="++show tablename++"\n\n\n") $
+                refAdd (Just colRef) =
+                    let tname = crTableName colRef in
+                    let a = crConstraintName colRef in
+                    tracex ("\n\n\n33333 findAlters adding fkey defConstraintName'="++show defConstraintName' ++" name="++show name++" tname="++show tname++" a="++show a++" tablename="++show tablename++"\n\n\n") $
                                            case find ((==tname) . entityDB) defs of
                                                 Just refdef -> [(tname, AddReference a [name] [fieldDB $ entityId refdef])]
                                                 Nothing -> error $ "could not find the entityDef for reftable[" ++ show tname ++ "]"
                 modRef = tracex ("modType: sqltype[" ++ show sqltype ++ "] sqltype'[" ++ show sqltype' ++ "] name=" ++ show name) $
-                    if fmap snd ref == fmap snd ref'
+                    if fmap crConstraintName ref == fmap crConstraintName ref'
                         then []
                         else tracex ("\n\n\nmodRef findAlters drop/add cos ref doesnt match ref[" ++ show ref ++ "] ref'[" ++ show ref' ++ "] tablename="++show tablename++"\n\n\n") $
                               refDrop ref' ++ refAdd ref
@@ -362,11 +369,14 @@ cmpdef (Just def) (Just def') | def==def' = True
 cmpdef _ _ = False
 
 -- | Get the references to be added to a table for the given column.
-getAddReference :: [EntityDef] -> DBName -> DBName -> DBName -> Maybe (DBName, DBName) -> Maybe AlterDB
+getAddReference :: [EntityDef] -> DBName -> DBName -> DBName -> Maybe ColumnReference -> Maybe AlterDB
 getAddReference allDefs table reftable cname ref =
     case ref of
         Nothing -> Nothing
-        Just (s, z) -> tracex ("\n\ngetaddreference table="++ show table++" reftable="++show reftable++" s="++show s++" z=" ++ show z++"\n\n") $
+        Just cRef ->
+           let s = crTableName cRef in
+           let z = crConstraintName cRef in
+           tracex ("\n\ngetaddreference table="++ show table++" reftable="++show reftable++" s="++show s++" z=" ++ show z++"\n\n") $
                        Just $ AlterColumn table (s, AddReference (refName table cname) [cname] [id_])
                           where
                             id_ = maybe (error $ "Could not find ID of entity " ++ show reftable)
@@ -376,7 +386,7 @@ getAddReference allDefs table reftable cname ref =
 
 
 showColumn :: Column -> String
-showColumn (Column n nu sqlType' def _defConstraintName _maxLen _ref) = concat
+showColumn (Column n nu sqlType' def _generated _defConstraintName _maxLen _ref) = concat
     [ T.unpack $ escape n
     , " "
     , showSqlType sqlType' _maxLen

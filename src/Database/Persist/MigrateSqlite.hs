@@ -78,7 +78,8 @@ migrate' :: [EntityDef]
          -> EntityDef
          -> IO (Either [Text] [(Bool, Text)])
 migrate' allDefs getter val = do
-    let (cols, uniqs, _fdefs) = mkColumns allDefs val
+    let (cols, uniqs, _fdefs) =
+            mkColumns allDefs val emptyBackendSpecificOverrides
     let newSql = mkCreateTable False def (filter (not . safeToRemove val . cName) cols, uniqs)
     stmt <- getter "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
     oldSql' <- with (stmtQuery stmt [PersistText $ unDBName table]) (`connect` go)
@@ -105,7 +106,7 @@ migrate' allDefs getter val = do
 -- list.
 safeToRemove :: EntityDef -> DBName -> Bool
 safeToRemove def (DBName colName)
-    = any (elem "SafeToRemove" . fieldAttrs)
+    = any (elem FieldAttrSafeToRemove . fieldAttrs)
     $ filter ((== (DBName colName)) . fieldDB)
     $ entityFields def
 
@@ -138,7 +139,7 @@ getCopyTable allDefs getter def = do
             Just y -> error $ "Invalid result from PRAGMA table_info: " ++ show y
     table = entityDB def
     tableTmp = DBName $ unDBName table <> "_backup"
-    (cols, uniqs, _) = mkColumns allDefs def
+    (cols, uniqs, _) = mkColumns allDefs def emptyBackendSpecificOverrides
     cols' = filter (not . safeToRemove def . cName) cols
     newSql = mkCreateTable False def (cols', uniqs)
     tmpSql = mkCreateTable True def { entityDB = tableTmp } (cols', uniqs)
@@ -206,7 +207,7 @@ mayDefault def = case def of
     Just d -> " DEFAULT " <> d
 
 sqlColumn :: Column -> Text
-sqlColumn (Column name isNull typ def _cn _maxLen ref) = T.concat
+sqlColumn (Column name isNull typ def _generated _cn _maxLen ref) = T.concat
     [ ","
     , escape name
     , " "
@@ -217,7 +218,7 @@ sqlColumn (Column name isNull typ def _cn _maxLen ref) = T.concat
         Just d -> " DEFAULT " `T.append` d
     , case ref of
         Nothing -> ""
-        Just (table, _) -> " REFERENCES " `T.append` escape table
+        Just colRef -> " REFERENCES " `T.append` escape (crTableName colRef)
     ]
 
 sqlUnique :: UniqueDef -> Text

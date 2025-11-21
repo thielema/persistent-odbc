@@ -52,7 +52,7 @@ library
                     , monad-logger
                     , resourcet
                     , persistent-template >= 2.6.0 && < 2.8.3
-                    , persistent    >= 2.6.0 && < 2.11
+                    , persistent    >= 2.11 && < 2.12
                     , bytestring
 
 
@@ -80,7 +80,7 @@ Executable TestODBC
                     , monad-logger
                     , resourcet
                     , persistent-template >= 2.6.0 && < 2.8.3
-                    , persistent    >= 2.6.0 && < 2.11
+                    , persistent    >= 2.11 && < 2.12
                     , bytestring
   else
       buildable: False
