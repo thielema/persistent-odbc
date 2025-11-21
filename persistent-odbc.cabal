@@ -91,4 +91,4 @@ Executable TestODBC
 
 source-repository head
   type:     git
-  location: git://github.com/gbwey/persistent-odbc.git
+  location: https://github.com/gbwey/persistent-odbc
