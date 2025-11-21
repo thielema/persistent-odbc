@@ -105,9 +105,9 @@ migrate' allDefs getter val = do
 -- | Check if a column name is listed as the "safe to remove" in the entity
 -- list.
 safeToRemove :: EntityDef -> DBName -> Bool
-safeToRemove def (DBName colName)
+safeToRemove def colName
     = any (elem FieldAttrSafeToRemove . fieldAttrs)
-    $ filter ((== (DBName colName)) . fieldDB)
+    $ filter ((== colName) . fieldDB)
     $ entityFields def
 
 getCopyTable :: [EntityDef]
