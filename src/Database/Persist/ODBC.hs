@@ -60,7 +60,7 @@ type ConnectionString = String
 -- finishes using it.  Note that you should not use the given
 -- 'ConnectionPool' outside the action since it may be already
 -- been released.
-withODBCPool :: (MonadUnliftIO m, MonadLogger m)
+withODBCPool :: (MonadUnliftIO m, MonadLoggerIO m)
              => Maybe DBType
              -> ConnectionString
              -- ^ Connection string to the database.
@@ -78,7 +78,7 @@ withODBCPool dbt ci = withSqlPool (\lg -> open' lg dbt ci)
 -- responsibility to properly close the connection pool when
 -- unneeded.  Use 'withODBCPool' for an automatic resource
 -- control.
-createODBCPool :: (MonadUnliftIO m, MonadLogger m)
+createODBCPool :: (MonadUnliftIO m, MonadLoggerIO m)
                => Maybe DBType
                -> ConnectionString
                -- ^ Connection string to the database.
@@ -90,7 +90,7 @@ createODBCPool dbt ci = createSqlPool (\lg -> open' lg dbt ci)
 
 -- | Same as 'withODBCPool', but instead of opening a pool
 -- of connections, only one connection is opened.
-withODBCConn :: (MonadUnliftIO m, MonadLogger m)
+withODBCConn :: (MonadUnliftIO m, MonadLoggerIO m)
              => Maybe DBType -> ConnectionString -> (SqlBackend -> m a) -> m a
 withODBCConn dbt cs = withSqlConn (\lg -> open' lg dbt cs)
 
@@ -142,7 +142,9 @@ openSimpleConn logFunc mdbtype conn = do
             -- Transaction begining means that previous commited
         , connCommit        = const $ O.commit   conn
         , connRollback      = const $ O.rollback conn
-        , connEscapeName    = dbmsEscape mig
+        , connEscapeFieldName = dbmsEscapeFieldName mig
+        , connEscapeTableName = dbmsEscapeTableName mig
+        , connEscapeRawName   = dbmsEscapeRawName mig
         , connNoLimit       = "" -- esqueleto uses this but needs to use connLimitOffset then we can dump this field
         , connRDBMS         = T.pack $ show (dbmsType mig)
         , connLimitOffset   = dbmsLimitOffset mig

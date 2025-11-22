@@ -23,6 +23,8 @@ data MigrationStrategy = MigrationStrategy {
                             dbmsLimitOffset :: (Int,Int) -> Bool -> Text -> Text
                            ,dbmsMigrate :: [EntityDef] -> (Text -> IO Statement) -> EntityDef -> IO (Either [Text] [(Bool, Text)])
                            ,dbmsInsertSql :: EntityDef -> [PersistValue] -> InsertSqlResult
-                           ,dbmsEscape :: DBName -> Text
+                           ,dbmsEscapeFieldName :: FieldNameDB -> Text
+                           ,dbmsEscapeTableName :: EntityDef -> Text
+                           ,dbmsEscapeRawName :: Text -> Text
                            ,dbmsType :: DBType
                            }

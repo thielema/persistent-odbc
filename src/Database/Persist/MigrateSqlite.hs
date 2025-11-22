@@ -27,7 +27,9 @@ getMigrationStrategy dbtype@Sqlite { sqlite3619 = _fksupport } =
                           { dbmsLimitOffset=decorateSQLWithLimitOffset "LIMIT -1"
                            ,dbmsMigrate=migrate'
                            ,dbmsInsertSql=insertSql'
-                           ,dbmsEscape=escape
+                           ,dbmsEscapeFieldName = escape
+                           ,dbmsEscapeTableName = escape . entityDB
+                           ,dbmsEscapeRawName = escape . FieldNameDB
                            ,dbmsType=dbtype
                           }
 getMigrationStrategy dbtype = error $ "Sqlite: calling with invalid dbtype " ++ show dbtype
@@ -82,7 +84,7 @@ migrate' allDefs getter val = do
             mkColumns allDefs val emptyBackendSpecificOverrides
     let newSql = mkCreateTable False def (filter (not . safeToRemove val . cName) cols, uniqs)
     stmt <- getter "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
-    oldSql' <- with (stmtQuery stmt [PersistText $ unDBName table]) (`connect` go)
+    oldSql' <- with (stmtQuery stmt [PersistText $ unEntityNameDB table]) (`connect` go)
     case oldSql' of
         Nothing -> return $ Right [(False, newSql)]
         Just oldSql -> do
@@ -104,7 +106,7 @@ migrate' allDefs getter val = do
 
 -- | Check if a column name is listed as the "safe to remove" in the entity
 -- list.
-safeToRemove :: EntityDef -> DBName -> Bool
+safeToRemove :: EntityDef -> FieldNameDB -> Bool
 safeToRemove def colName
     = any (elem FieldAttrSafeToRemove . fieldAttrs)
     $ filter ((== colName) . fieldDB)
@@ -117,7 +119,7 @@ getCopyTable :: [EntityDef]
 getCopyTable allDefs getter def = do
     stmt <- getter $ pack $ "PRAGMA table_info(" ++ escape' table ++ ")"
     oldCols' <- with (stmtQuery stmt []) (`connect` getCols)
-    let oldCols = map DBName $ filter (/= "id") oldCols' -- need to update for table id attribute ?
+    let oldCols = map FieldNameDB $ filter (/= "id") oldCols' -- need to update for table id attribute ?
     let newCols = filter (not . safeToRemove def) $ map cName cols
     let common = filter (`elem` oldCols) newCols
     let id_ = fieldDB (entityId def)
@@ -138,7 +140,7 @@ getCopyTable allDefs getter def = do
                 return $ name : names
             Just y -> error $ "Invalid result from PRAGMA table_info: " ++ show y
     table = entityDB def
-    tableTmp = DBName $ unDBName table <> "_backup"
+    tableTmp = EntityNameDB $ unEntityNameDB table <> "_backup"
     (cols, uniqs, _) = mkColumns allDefs def emptyBackendSpecificOverrides
     cols' = filter (not . safeToRemove def . cName) cols
     newSql = mkCreateTable False def (cols', uniqs)
@@ -165,7 +167,7 @@ getCopyTable allDefs getter def = do
         ]
 
 
-escape' :: DBName -> String
+escape' :: DatabaseName name => name -> String
 escape' = T.unpack . escape
 
 mkCreateTable :: Bool -> EntityDef -> ([Column], [UniqueDef]) -> Text
@@ -230,8 +232,9 @@ sqlUnique (UniqueDef _ cname cols _) = T.concat
     , ")"
     ]
 
-escape :: DBName -> Text
-escape (DBName s) =
+escape :: DatabaseName name => name -> Text
+escape =
+    escapeWith $ \s ->
     T.concat [q, T.concatMap go s, q]
   where
     q = T.singleton '"'

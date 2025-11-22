@@ -45,7 +45,10 @@ getMigrationStrategy dbtype@MySQL {} =
                           { dbmsLimitOffset=decorateSQLWithLimitOffset "LIMIT 18446744073709551615"
                            ,dbmsMigrate=migrate'
                            ,dbmsInsertSql=insertSql'
-                           ,dbmsEscape=T.pack . escapeDBName
+                           ,dbmsEscapeFieldName = T.pack . escapeDBName
+                           ,dbmsEscapeTableName =
+                               T.pack . escapeDBName . entityDB
+                           ,dbmsEscapeRawName = T.pack . escapeDBName . FieldNameDB
                            ,dbmsType=dbtype
                           }
 getMigrationStrategy dbtype = error $ "MySQL: calling with invalid dbtype " ++ show dbtype
@@ -96,10 +99,10 @@ migrate' allDefs getter val = do
               let refTblName = crTableName cRef
               let a = crConstraintName cRef
               tracex ("\n\n111foreigns cname="++show cname++" name="++show name++" refTblName="++show refTblName++" a="++show a) $
-               return $ AlterColumn name (refTblName, addReference allDefs (refName name cname) refTblName cname)
+               return $ AlterColumn name (addReference allDefs (refName name cname) refTblName cname)
 
         let foreignsAlt = map (\fdef -> let (childfields, parentfields) = unzip (map (\((_,b),(_,d)) -> (b,d)) (foreignFields fdef))
-                                        in AlterColumn name (foreignRefTableDBName fdef, AddReference (foreignRefTableDBName fdef) (foreignConstraintNameDBName fdef) childfields parentfields)) fdefs
+                                        in AlterColumn name (AddReference (foreignRefTableDBName fdef) (foreignConstraintNameDBName fdef) childfields parentfields)) fdefs
 
         return $ Right $ map showAlterDb $ addTable : uniques ++ foreigns ++ foreignsAlt
       -- No errors and something found, migrate
@@ -121,7 +124,8 @@ migrate' allDefs getter val = do
 
 
 -- | Find out the type of a column.
-findTypeOfColumn :: [EntityDef] -> DBName -> DBName -> (DBName, FieldType)
+findTypeOfColumn ::
+    [EntityDef] -> EntityNameDB -> FieldNameDB -> (FieldNameDB, FieldType)
 findTypeOfColumn allDefs name col =
     maybe (error $ "Could not find type of column " ++
                    show col ++ " on table " ++ show name ++
@@ -133,7 +137,7 @@ findTypeOfColumn allDefs name col =
 
 
 -- | Helper for 'AddRefence' that finds out the 'entityId'.
-addReference :: [EntityDef] -> DBName -> DBName -> DBName -> AlterColumn
+addReference :: [EntityDef] -> ConstraintNameDB -> EntityNameDB -> FieldNameDB -> AlterColumn
 addReference allDefs fkeyname reftable cname = tracex ("\n\naddreference cname="++show cname++" fkeyname="++show fkeyname++" reftable="++show reftable++" id_="++show id_) $
                                   AddReference reftable fkeyname [cname] [id_]
     where
@@ -143,26 +147,25 @@ addReference allDefs fkeyname reftable cname = tracex ("\n\naddreference cname="
                     entDef <- find ((== reftable) . entityDB) allDefs
                     return (fieldDB $ entityId entDef)
 
-data AlterColumn = Change Column
-                 | Add' Column
-                 | Drop
-                 | Default String
-                 | NoDefault
-                 | Update' String
-                 | AddReference DBName DBName [DBName] [DBName]
-                 | DropReference DBName
+data AlterColumn =
+          Change FieldNameDB Column
+        | Add' Column
+        | Drop FieldNameDB
+        | Default FieldNameDB String
+        | NoDefault FieldNameDB
+        | Update' FieldNameDB String
+        | AddReference EntityNameDB ConstraintNameDB [FieldNameDB] [FieldNameDB]
+        | DropReference ConstraintNameDB
 
-type AlterColumn' = (DBName, AlterColumn)
-
-data AlterTable = AddUniqueConstraint DBName [(DBName, FieldType)]
-                | DropUniqueConstraint DBName
+data AlterTable =
+          AddUniqueConstraint ConstraintNameDB [(FieldNameDB, FieldType)]
+        | DropUniqueConstraint ConstraintNameDB
 
 data AlterDB = AddTable String
-             | AlterColumn DBName AlterColumn'
-             | AlterTable DBName AlterTable
+             | AlterColumn EntityNameDB AlterColumn
+             | AlterTable EntityNameDB AlterTable
 
-
-udToPair :: UniqueDef -> (DBName, [DBName])
+udToPair :: UniqueDef -> (ConstraintNameDB, [FieldNameDB])
 udToPair ud = (uniqueDBName ud, map snd $ uniqueFields ud)
 
 ----------------------------------------------------------------------
@@ -172,8 +175,8 @@ udToPair ud = (uniqueDBName ud, map snd $ uniqueFields ud)
 -- in the database.
 getColumns :: (Text -> IO Statement)
            -> EntityDef
-           -> IO ( [Either Text (Either Column (DBName, [DBName]))] -- ID column
-                 , [Either Text (Either Column (DBName, [DBName]))] -- everything else
+           -> IO ( [Either Text (Either Column (ConstraintNameDB, [FieldNameDB]))] -- ID column
+                 , [Either Text (Either Column (ConstraintNameDB, [FieldNameDB]))] -- everything else
                  )
 getColumns getter def = do
     -- Find out ID column.
@@ -225,8 +228,8 @@ getColumns getter def = do
     -- Return both
     return (ids, cs ++ us)
   where
-    vals = [ PersistText $ unDBName $ entityDB def
-           , PersistText $ unDBName $ fieldDB $ entityId def ]
+    vals = [ PersistText $ unEntityNameDB $ entityDB def
+           , PersistText $ unFieldNameDB $ fieldDB $ entityId def ]
 
     helperClmns = CL.mapM getIt .| CL.consume
         where
@@ -240,13 +243,13 @@ getColumns getter def = do
                                                        , T.decodeUtf8 clmnName )
           check other = fail $ "helperCntrs: unexpected " ++ show other
       rows <- mapM check =<< CL.consume
-      return $ map (Right . Right . (DBName . fst . head &&& map (DBName . snd)))
+      return $ map (Right . Right . (ConstraintNameDB . fst . head &&& map (FieldNameDB . snd)))
              $ groupBy ((==) `on` fst) rows
 
 
 -- | Get the information about a column in a table.
 getColumn :: (Text -> IO Statement)
-          -> DBName
+          -> EntityNameDB
           -> [PersistValue]
           -> IO (Either Text Column)
 getColumn getter tname [ PersistByteString cname
@@ -283,7 +286,7 @@ getColumn getter tname [ PersistByteString cname
         ,"and ordinal_position = 1 "
         ,"ORDER BY CONSTRAINT_NAME, "
         ,"COLUMN_NAME"]
-      let vars = [ PersistText $ unDBName tname
+      let vars = [ PersistText $ unEntityNameDB tname
                  , PersistByteString cname
                  ]
       cntrs <- liftIO $ with (stmtQuery stmt vars) (`connect` CL.consume)
@@ -291,12 +294,12 @@ getColumn getter tname [ PersistByteString cname
                [] -> return Nothing
                [[PersistByteString tab, PersistByteString ref, PersistInt64 pos]] ->
                    tracex ("\n\n\nGBREF "++show (tab,ref,pos)++"\n\n") $
-                    return $ Just $ ColumnReference (DBName $ T.decodeUtf8 tab) (DBName $ T.decodeUtf8 ref) noCascade
+                    return $ Just $ ColumnReference (EntityNameDB $ T.decodeUtf8 tab) (ConstraintNameDB $ T.decodeUtf8 ref) noCascade
                a1 -> fail $ "MySQL.getColumn/getRef: never here error[" ++ show a1 ++ "]"
 
       -- Okay!
       return Column
-        { cName = DBName $ T.decodeUtf8 cname
+        { cName = FieldNameDB $ T.decodeUtf8 cname
         , cNull = null_ == "YES"
         , cSqlType = type_
         , cGenerated = Nothing
@@ -357,10 +360,10 @@ parseType b            = error $ "no idea how to handle this type b=" ++ show b 
 -- | @getAlters allDefs tblName new old@ finds out what needs to
 -- be changed from @old@ to become @new@.
 getAlters :: [EntityDef]
-          -> DBName
-          -> ([Column], [(DBName, [DBName])])
-          -> ([Column], [(DBName, [DBName])])
-          -> ([AlterColumn'], [AlterTable])
+          -> EntityNameDB
+          -> ([Column], [(ConstraintNameDB, [FieldNameDB])])
+          -> ([Column], [(ConstraintNameDB, [FieldNameDB])])
+          -> ([AlterColumn], [AlterTable])
 getAlters allDefs tblName (c1, u1) (c2, u2) =
     (getAltersC c1 c2, getAltersU u1 u2)
   where
@@ -370,9 +373,8 @@ getAlters allDefs tblName (c1, u1) (c2, u2) =
          in alters ++ getAltersC news old'
 
     dropColumn col =
-      map ((,) (cName col)) $
         [DropReference (crConstraintName cRef) | Just cRef <- [cReference col]] ++
-        [Drop]
+        [Drop (cName col)]
 
     getAltersU [] old = map (DropUniqueConstraint . fst) old
     getAltersU ((name, cols):news) old =
@@ -393,16 +395,16 @@ getAlters allDefs tblName (c1, u1) (c2, u2) =
 -- | @findAlters newColumn oldColumns@ finds out what needs to be
 -- changed in the columns @oldColumns@ for @newColumn@ to be
 -- supported.
-findAlters :: DBName -> [EntityDef] -> Column -> [Column] -> ([AlterColumn'], [Column])
+findAlters :: EntityNameDB -> [EntityDef] -> Column -> [Column] -> ([AlterColumn], [Column])
 findAlters tblName allDefs col@(Column name isNull type_ def _generated defConstraintName _maxLen ref) cols =
     tracex ("\n\n\nfindAlters tablename="++show tblName++ " name="++ show name++" col="++show col++"\ncols="++show cols++"\n\n\n") $
       case filter ((name ==) . cName) cols of
         [] -> case ref of
-               Nothing -> ([(name, Add' col)], [])
+               Nothing -> ([Add' col], [])
                Just (ColumnReference tname b _) ->
                                   let cnstr = tracex ("\n\ncols="++show cols++"\n\n2222findalters new foreignkey col["++showColumn col++"] name["++show name++"] tname["++show tname++"] b["++show b ++ "]") $
                                               [addReference allDefs (refName tblName name) tname name]
-                                  in (map ((,) name) (Add' col : cnstr), cols)
+                                  in (Add' col : cnstr, cols)
         Column _ isNull' type_' def' _generated defConstraintName' _maxLen' ref':_ ->
             let -- Foreign key
                 refDrop =
@@ -410,7 +412,7 @@ findAlters tblName allDefs col@(Column name isNull type_ def _generated defConst
                         (False, Just cRef) ->
                             let cname = crConstraintName cRef in
                             tracex ("\n\n44444findalters dropping foreignkey cname[" ++ show cname ++ "] ref[" ++ show ref ++"]") $
-                                                        [(name, DropReference cname)]
+                                                        [DropReference cname]
                         _ -> []
                 refAdd  =
                     case (ref == ref', ref) of
@@ -418,17 +420,17 @@ findAlters tblName allDefs col@(Column name isNull type_ def _generated defConst
                             let tname = crTableName cRef in
                             let cname = crConstraintName cRef in
                             tracex ("\n\n33333 findalters foreignkey has changed cname["++show cname++"] name["++show name++"] tname["++show tname++"] ref["++show ref++"] ref'["++show ref' ++ "]") $
-                                                             [(tname, addReference allDefs (refName tblName name) tname name)]
+                                                             [addReference allDefs (refName tblName name) tname name]
                         _ -> []
                 -- Type and nullability
                 modType | tpcheck type_ type_' && isNull == isNull' = []
-                        | otherwise = [(name, Change col)]
+                        | otherwise = [Change name col]
                 -- Default value
                 modDef | cmpdef def def' = []
                        | otherwise   = tracex ("\n\nfindAlters modDef col=" ++ show col ++ " name=" ++ show name ++ " def=" ++ show def ++ " def'=" ++ show def' ++ " defConstraintName=" ++ show defConstraintName++" defConstraintName'=" ++ show defConstraintName' ++ "\n\n") $
                                        case def of
-                                         Nothing -> [(name, NoDefault)]
-                                         Just s -> [(name, Default $ T.unpack s)]
+                                         Nothing -> [NoDefault name]
+                                         Just s -> [Default name $ T.unpack s]
             in ( refDrop ++ modType ++ modDef ++ refAdd
                , filter ((name /=) . cName) cols )
 
@@ -487,16 +489,16 @@ showSqlType (SqlOther t) _        = T.unpack t
 -- | Render an action that must be done on the database.
 showAlterDb :: AlterDB -> (Bool, Text)
 showAlterDb (AddTable s) = (False, pack s)
-showAlterDb (AlterColumn t (c, ac)) =
-    (isUnsafe ac, pack $ showAlter t (c, ac))
+showAlterDb (AlterColumn t ac) =
+    (isUnsafe ac, pack $ showAlter t ac)
   where
-    isUnsafe Drop = True
-    isUnsafe _    = False
+    isUnsafe (Drop _) = True
+    isUnsafe _        = False
 showAlterDb (AlterTable t at) = (False, pack $ showAlterTable t at)
 
 
 -- | Render an action that must be done on a table.
-showAlterTable :: DBName -> AlterTable -> String
+showAlterTable :: EntityNameDB -> AlterTable -> String
 showAlterTable table (AddUniqueConstraint cname cols) = concat
     [ "ALTER TABLE "
     , escapeDBName table
@@ -520,8 +522,8 @@ showAlterTable table (DropUniqueConstraint cname) = concat
 
 
 -- | Render an action that must be done on a column.
-showAlter :: DBName -> AlterColumn' -> String
-showAlter table (oldName, Change (Column n nu t def _generated defConstraintName maxLen _ref)) =
+showAlter :: EntityNameDB -> AlterColumn -> String
+showAlter table (Change oldName (Column n nu t def _generated defConstraintName maxLen _ref)) =
     concat
     [ "ALTER TABLE "
     , escapeDBName table
@@ -530,21 +532,21 @@ showAlter table (oldName, Change (Column n nu t def _generated defConstraintName
     , " "
     , showColumn (Column n nu t def _generated defConstraintName maxLen Nothing)
     ]
-showAlter table (_, Add' col) =
+showAlter table (Add' col) =
     concat
     [ "ALTER TABLE "
     , escapeDBName table
     , " ADD COLUMN "
     , showColumn col
     ]
-showAlter table (n, Drop) =
+showAlter table (Drop n) =
     concat
     [ "ALTER TABLE "
     , escapeDBName table
     , " DROP COLUMN "
     , escapeDBName n
     ]
-showAlter table (n, Default s) =
+showAlter table (Default n s) =
     concat
     [ "ALTER TABLE "
     , escapeDBName table
@@ -553,7 +555,7 @@ showAlter table (n, Default s) =
     , " SET DEFAULT "
     , s
     ]
-showAlter table (n, NoDefault) =
+showAlter table (NoDefault n) =
     concat
     [ "ALTER TABLE "
     , escapeDBName table
@@ -561,7 +563,7 @@ showAlter table (n, NoDefault) =
     , escapeDBName n
     , " DROP DEFAULT"
     ]
-showAlter table (n, Update' s) =
+showAlter table (Update' n s) =
     concat
     [ "UPDATE "
     , escapeDBName table
@@ -573,7 +575,7 @@ showAlter table (n, Update' s) =
     , escapeDBName n
     , " IS NULL"
     ]
-showAlter table (_, AddReference reftable fkeyname t2 id2) = concat
+showAlter table (AddReference reftable fkeyname t2 id2) = concat
     [ "ALTER TABLE "
     , escapeDBName table
     , " ADD CONSTRAINT "
@@ -586,23 +588,24 @@ showAlter table (_, AddReference reftable fkeyname t2 id2) = concat
     , intercalate "," $ map escapeDBName id2
     , ")"
     ]
-showAlter table (_, DropReference cname) = concat
+showAlter table (DropReference cname) = concat
     [ "ALTER TABLE "
     , escapeDBName table
     , " DROP FOREIGN KEY "
     , escapeDBName cname
     ]
 
-refName :: DBName -> DBName -> DBName
-refName (DBName table) (DBName column) =
-    DBName $ T.concat [table, "_", column, "_fkey"]
+refName :: EntityNameDB -> FieldNameDB -> ConstraintNameDB
+refName (EntityNameDB table) (FieldNameDB column) =
+    ConstraintNameDB $ T.concat [table, "_", column, "_fkey"]
 
 ----------------------------------------------------------------------
 
 
 -- | Escape a database name to be included on a query.
-escapeDBName :: DBName -> String
-escapeDBName (DBName s) = '`' : go (T.unpack s)
+escapeDBName :: DatabaseName name => name -> String
+escapeDBName =
+    escapeWith $ \s -> '`' : go (T.unpack s)
     where
       go ('`':xs) = '`' : '`' : go xs
       go ( x :xs) =     x     : go xs
