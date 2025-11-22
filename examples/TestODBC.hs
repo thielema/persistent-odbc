@@ -20,6 +20,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE DataKinds #-}
 module Main where
 import Database.Persist
 import Database.Persist.ODBC
